@@ -93,7 +93,7 @@ class PingUi:
 
     def get_wsize_h(self, i):
         """ Fill table with horizontal spit """
-        self.panels[i]['h'] = (self.stdscr_y / self.address_nb) - 2
+        self.panels[i]['h'] = (self.stdscr_y / self.address_nb) - 3
         self.panels[i]['l'] = self.stdscr_x - 4
         self.panels[i]['y'] = ((self.stdscr_y / self.address_nb) * i) + 2
         self.panels[i]['x'] = 2
@@ -103,7 +103,7 @@ class PingUi:
     def get_wsize_v(self, i):
         """ Fill table with vertical spit """
         self.panels[i]['h'] = self.stdscr_y - 3
-        self.panels[i]['l'] = (self.stdscr_x / self.address_nb) - 2
+        self.panels[i]['l'] = (self.stdscr_x / self.address_nb) - 3
         self.panels[i]['y'] = 2
         self.panels[i]['x'] = ((self.stdscr_x / self.address_nb) * i) + 2
         self.panels[i]['y_ti'] = 1
