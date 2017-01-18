@@ -1,0 +1,252 @@
+from subprocess import Popen, PIPE, STDOUT
+import curses, curses.panel
+import time
+import fcntl
+import signal
+import socket
+import struct
+import pty, os, sys, re
+
+class PingUi:
+    def __init__(self, stdscr, address_list, ping_args, panel_display='h'):
+        """ Init screen params """
+        curses.curs_set(0)
+            
+        self.stdscr = stdscr
+        self.stdscr.box()
+        self.stdscr.timeout(0)
+        self.stdscr_y, self.stdscr_x = self.stdscr.getmaxyx()
+
+        self.panels = dict()
+        self.panel_type = panel_display
+        self.address_list = address_list
+        self.ping_args = ping_args
+        self.address_nb = len(address_list)
+        self.panel_fct = {
+            'h' : self.get_wsize_h,
+            'v' : self.get_wsize_v,
+        }
+        self.original_sigint = signal.getsignal(signal.SIGINT)
+        signal.signal(signal.SIGINT, self.break_ping)
+
+
+    def __enter__(self):
+        """ draw panels """
+        for i in xrange(len(self.address_list)):
+            if not i in self.panels.keys():
+                self.panels[i] = dict()
+                self.panels[i]['addr'] = self.address_list[str(i)][0]
+                self.panels[i]['bin'] = self.address_list[str(i)][1]
+
+            # Get w size 
+            self.panel_fct[self.panel_type](i)
+
+            # Create windows
+            self.panels[i]['win'] = curses.newwin(self.panels[i]['h'], self.panels[i]['l'], self.panels[i]['y'], self.panels[i]['x'])
+            self.panels[i]['win'].clear()
+            self.panels[i]['win'].box()
+            self.stdscr.addstr(self.panels[i]['y_ti'], self.panels[i]['x_ti'], self.panels[i]['addr'], curses.A_BOLD)
+        
+            # Create panel attached to the window
+            self.panels[i]['panel'] = curses.panel.new_panel(self.panels[i]['win'])
+            
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if exc_type is not None and exc_type == KeyboardInterrupt:
+            return self
+        elif exc_type is not None:
+            raise ValueError(str(exc_value) + str(exc_type))
+        return self
+
+    def resize_ui(self):
+        """ Resize the whole ui """
+        # Clear all the screen
+        self.stdscr.clear()
+        self.stdscr.box()
+        self.stdscr.refresh()            
+
+        # Get new screen size
+        self.stdscr_y, self.stdscr_x = self.stdscr.getmaxyx()
+
+        # Get new dim and move the panels
+        for i in xrange(len(self.address_list)):
+            self.panel_fct[self.panel_type](i)
+            self.stdscr.addstr(self.panels[i]['y_ti'], self.panels[i]['x_ti'], self.panels[i]['addr'], curses.A_BOLD)
+            self.move_panel(i)
+
+    def move_panel(self, i):
+        """ Move one panel """
+        # Clear all the window
+        self.panels[i]['win'].clear()
+        # Resize h, l 
+        self.panels[i]['win'].resize(self.panels[i]['h'], self.panels[i]['l'])
+        # Move to left corner to y, x
+        self.panels[i]['win'].mvwin(self.panels[i]['y'], self.panels[i]['x'])
+        # Redraw the box around
+        self.panels[i]['win'].box()
+        self.panels[i]['win'].refresh()
+        self.panels[i]['line'] = 1
+ 
+
+    def get_wsize_h(self, i):
+        """ Fill table with horizontal spit """
+        self.panels[i]['h'] = (self.stdscr_y / self.address_nb) - 2
+        self.panels[i]['l'] = self.stdscr_x - 4
+        self.panels[i]['y'] = ((self.stdscr_y / self.address_nb) * i) + 2
+        self.panels[i]['x'] = 2
+        self.panels[i]['y_ti'] = ((self.stdscr_y / self.address_nb) * i) + 1
+        self.panels[i]['x_ti'] = 3
+
+    def get_wsize_v(self, i):
+        """ Fill table with vertical spit """
+        self.panels[i]['h'] = self.stdscr_y - 3
+        self.panels[i]['l'] = (self.stdscr_x / self.address_nb) - 2
+        self.panels[i]['y'] = 2
+        self.panels[i]['x'] = ((self.stdscr_x / self.address_nb) * i) + 2
+        self.panels[i]['y_ti'] = 1
+        self.panels[i]['x_ti'] = ((self.stdscr_x / self.address_nb) * i) + 2
+
+
+    def get_ping_fd(self):
+        """ Create our ping childs """
+        for i in xrange(len(self.address_list)):
+            cmd = "%s %s %s" %(self.panels[i]['bin'], self.ping_args, self.panels[i]['addr'])
+            cmd = re.sub(' +',' ', cmd)
+            self.panels[i]['master'], self.panels[i]['slave'] = pty.openpty()
+            self.panels[i]['fd'] = Popen(cmd.split(' '), stdin=PIPE, stdout=self.panels[i]['slave'], stderr=self.panels[i]['slave'])
+            self.panels[i]['stdout'] = os.fdopen(self.panels[i]['master'])
+            self.panels[i]['line'] = 1
+        return 0
+
+    def destroy_ping_fd(self):
+        """ Kill our ping processes """
+        for i in xrange(len(self.address_list)):
+            self.panels[i]['fd'].kill()
+
+    def break_ping(self, signum, frame):
+        """ Put back sigint signal as original"""
+        signal.signal(signal.SIGINT, self.original_sigint)
+
+    def non_block_read(self, output):
+        """ Set input fd non block"""
+        fd = output.fileno()
+        fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+        try:
+            return output.readline()
+        except:
+            return 0
+
+    def run(self):
+        """ Main loop """
+        self.get_ping_fd()
+        while 1:
+            input = self.stdscr.getch()
+            if input != -1  and input == ord('2') and self.panel_type != 'v':
+                self.panel_type = 'v'
+                self.resize_ui()
+            elif input != -1  and input == ord('1') and self.panel_type != 'h':
+                self.panel_type = 'h'
+                self.resize_ui()
+            elif input != -1  and input == ord('q'):
+                self.destroy_ping_fd()
+                return 0
+            if curses.is_term_resized(self.stdscr_y, self.stdscr_x):
+                self.resize_ui()
+            for i in xrange(len(self.address_list)):
+                y, x = self.panels[i]['win'].getmaxyx()
+                if self.panels[i]['line'] >= y - 1:
+                    self.panels[i]['line'] = 1
+                    self.move_panel(i)
+                output = self.non_block_read(self.panels[i]['stdout'])
+                if output:
+                    self.panels[i]['win'].addnstr(self.panels[i]['line'], 1, output.rstrip(), x-2)                    
+                    self.panels[i]['line'] += 1
+            curses.panel.update_panels()
+            self.stdscr.refresh()
+            time.sleep(0.1)
+        return 0
+
+
+def is_ip_in_net(ip, net):
+    ipaddr = int(''.join([ '%02x' % int(x) for x in ip.split('.') ]), 16)
+    netstr, bits = net.split('/')
+    netaddr = int(''.join([ '%02x' % int(x) for x in netstr.split('.') ]), 16)
+    mask = (0xffffffff << (32 - int(bits))) & 0xffffffff
+    return (ipaddr & mask) == (netaddr & mask)
+
+def is_pingable(address):
+    # hostname
+    try:
+        soc = socket.getaddrinfo(address, None, socket.AF_INET)
+        # Remove 0.0.0.0/8
+        if is_ip_in_net(soc[0][4][0], '0.0.0.0/8'):
+            raise
+        return 'ping'
+    except:
+        pass
+    try:
+        soc = socket.getaddrinfo(address, None, socket.AF_INET6)
+        return 'ping6'
+    except:
+        pass
+    # Ipv4
+    try:
+        socket.inet_pton(socket.AF_INET, address)
+        return 'ping'
+    except AttributeError:
+        try:
+            socket.inet_aton(address)
+            return 'ping'
+        except socket.error:
+            pass
+    except socket.error:
+        pass
+    # ipv6
+    try:
+        socket.inet_pton(socket.AF_INET6, address)
+        return 'ping6'
+    except socket.error:
+        pass
+    return False
+
+def main(stdscr):
+    addr = {}
+    args = sys.argv[1:]
+
+    if not args:
+        curses.endwin()
+        print sys.argv[0] + " <ping param> addr,addr,...,n "
+        return 0
+
+    inc = 0
+    pbin = 0
+    args_copy = args[:]
+    for i in xrange(len(args)):
+        pbin = is_pingable(args[i])
+        if pbin:
+            addr[str(inc)] = [args[i], pbin]
+            inc += 1
+            args_copy.remove(args[i])
+        else:
+            fl = 0
+            for add in args[i].split(','):
+                pbin = is_pingable(add)
+                if pbin:
+                    fl = 1
+                    addr[str(inc)] = [add, pbin]
+                    inc += 1
+                pbin = 0 
+            if fl == 1:
+                args_copy.remove(args[i])
+                fl = 0
+        pbin = 0
+
+    ping_params = " ".join(args_copy)
+
+    with PingUi(stdscr, addr, ping_params, 'h') as ping:
+        ping.run()
+
+if __name__ == '__main__':
+    curses.wrapper(main)
